@@ -80,6 +80,10 @@ As a consequence, the system becomes reliant on RC4 (EncryptionType 0x17).
 ![](pictures/rc4_fallback.png)
 
 
+## Warning ⚠️
+Due to a bug using this tool is not recommended at the moment, I will fix this as soon as possible. Thanks for your patience.
+
+
 ## References
 - https://www.virusbulletin.com/uploads/pdf/magazine/2016/vb201601-skeleton-key.pdf
 - https://github.com/gentilkiwi/mimikatz
