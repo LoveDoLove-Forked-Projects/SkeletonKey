@@ -23,10 +23,10 @@ Skeleton Key is a malware which was found by the [Dell SecureWorks Counter Threa
 More information about the inner working of the SkeletonKey can be found [here](https://www.virusbulletin.com/uploads/pdf/magazine/2016/vb201601-skeleton-key.pdf).
 
 ## Differences with the Mimikatz's implementation?
-The Mimikatz's SkeletonKey version has been revisited and expanded with two major improvements. 
+This code is a reimplementation of the Mimikatz's misc::skeleton command. However, it also includes NTLM patching other than just covering Kerberos.
 
 ### NTLM Patching
-NTLM patching was added. For systems which are not Kerberos-enabled and use NTLM authentication, the Skeleton Key carries out the following steps:
+For systems which are not Kerberos-enabled and use NTLM authentication, the Skeleton Key carries out the following steps:
 - Injecting a custom handler to replicate the MsvpPasswordValidate function (ntlmshared.dll) in order to validate the skeleton key against the typed password if the latter does not match the original password;
 - Patching the pointer to MsvpPasswordValidate inside the Import Address Table of msv1_0.dll to be a pointer to the custom handler;
 
@@ -39,49 +39,6 @@ What happens is that lsass will call our custom MsvpPasswordValidate instead of 
 The custom handler replaces the latter with the hash of the Skeleton Key.
 
 ![](pictures/compare.png)
-
-
-### RC4 Fallback Update
-Contrary to Mimikatz, the RC4 fallback is not triggered by zeroing out the LSA_UNICODE_STRING struct describing the unicode string "kerberos-newer-keys". Rather, the value EncryptionType inside the single AES128 and AES256 packages (KERB_ECRYPT struct) are patched so that lsass is unable to retrieve pointers to these packages. Consequently, the system is forced to rely on RC4 to proceed with the authentication phase. According to Mimikatz, a KERB_ECRYPT struct describes the encryption scheme characteristics, such as pointers to functions the algorithm relies on. 'Initialize' and 'Decrypt' are always called during authentication.
-
-
-```c
-typedef struct _KERB_ECRYPT {
-	ULONG EncryptionType;
-	ULONG BlockSize;
-	ULONG ExportableEncryptionType;
-	ULONG KeySize;
-	ULONG HeaderSize;
-	ULONG PreferredCheckSum;
-	ULONG Attributes;
-	PCWSTR Name;
-	PKERB_ECRYPT_INITIALIZE Initialize;
-	PKERB_ECRYPT_ENCRYPT Encrypt;
-	PKERB_ECRYPT_DECRYPT Decrypt;
-	PKERB_ECRYPT_FINISH Finish;
-	union {
-		PKERB_ECRYPT_HASHPASSWORD_NT5 HashPassword_NT5;
-		PKERB_ECRYPT_HASHPASSWORD_NT6 HashPassword_NT6;
-	};
-	PKERB_ECRYPT_RANDOMKEY RandomKey;
-	PKERB_ECRYPT_CONTROL Control;
-	PVOID unk0_null;
-	PVOID unk1_null;
-	PVOID unk2_null;
-} KERB_ECRYPT, * PKERB_ECRYPT;
-```
-
-During authentication, by default the system tries to retrieve a pointer to the AES128 and AES256 KERB_ECRYPT structs by performing a lookup of their EncryptionTypes. So the SkeletonKey edits AES128 and AES256 EncryptionType values to be 0xff.
-
-![](pictures/aes256_patched.png)
-
-As a consequence, the system becomes reliant on RC4 (EncryptionType 0x17).
-
-![](pictures/rc4_fallback.png)
-
-
-## Warning ⚠️
-Due to a bug using this tool is not recommended at the moment, I will fix this as soon as possible. Thanks for your patience.
 
 
 ## References
